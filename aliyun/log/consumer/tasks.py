@@ -6,6 +6,8 @@ import logging
 from .config import CursorPosition
 from ..logexception import LogException
 import time
+import six
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +42,14 @@ class ConsumerProcessorBase(object):
         raise NotImplementedError('not create method process')
 
     def shutdown(self, check_point_tracker):
-        logger.info("ConsumerProcesser is shutdown, shard id: {0}".format(self.shard_id))
+        consumer_client = check_point_tracker.consumer_group_client
+        _id = '/'.join([
+            consumer_client.mproject, consumer_client.mlogstore,
+            consumer_client.mconsumer_group, consumer_client.mconsumer,
+            str(self.shard_id)
+        ])
+        logger.info("[%s]ConsumerProcesser is shutdown, shard id: %s", _id,
+                    self.shard_id)
         self.save_checkpoint(check_point_tracker, force=True)
 
 
@@ -60,9 +69,19 @@ class ConsumerProcessorAdaptor(ConsumerProcessorBase):
 class TaskResult(object):
     def __init__(self, task_exception):
         self.task_exception = task_exception
+        self._exc_info = None
+        if six.PY2 and task_exception is not None:
+            self._exc_info = sys.exc_info()
 
     def get_exception(self):
         return self.task_exception
+
+    @property
+    def exc_info(self):
+        if six.PY3:
+            return self.task_exception
+        else:
+            return self._exc_info
 
 
 class ProcessTaskResult(TaskResult):
@@ -113,8 +132,6 @@ def consumer_process_task(processor, log_groups, check_point_tracker):
         check_point = processor.process(log_groups, check_point_tracker)
         check_point_tracker.flush_check()
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         return TaskResult(e)
     return ProcessTaskResult(check_point)
 
@@ -155,9 +172,10 @@ def consumer_fetch_task(loghub_client_adapter, shard_id, cursor, max_fetch_log_g
         try:
             response = loghub_client_adapter.pull_logs(shard_id, cursor, count=max_fetch_log_group_size)
             fetch_log_group_list = response.get_loggroup_list()
-            logger.debug("shard id = " + str(shard_id) + " cursor = " + cursor
-                         + " next cursor" + response.get_next_cursor() + " size:" + str(response.get_log_count()))
             next_cursor = response.get_next_cursor()
+            logger.debug("shard id = %s cursor = %s next cursor = %s size: %s",
+                         shard_id, cursor, next_cursor,
+                         response.get_log_count())
             if not next_cursor:
                 return FetchTaskResult(fetch_log_group_list, cursor)
             else:

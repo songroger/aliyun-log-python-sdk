@@ -6,9 +6,10 @@ from logging.handlers import RotatingFileHandler
 from aliyun.log.consumer import *
 from aliyun.log.pulllog_response import PullLogResponse
 from multiprocessing import current_process
-import json
-import socket
-import requests
+import aliyun.log.ext.syslogclient as syslogclient
+from aliyun.log.ext.syslogclient import SyslogClientRFC5424 as SyslogClient
+import six
+from datetime import datetime
 
 # configure logging file
 root = logging.getLogger()
@@ -25,75 +26,54 @@ class SyncData(ConsumerProcessorBase):
     """
     this consumer will forward logs to Splunk.
     """
-    def __init__(self, splunk_setting=None):
+    def __init__(self, target_setting=None):
         """
-        :param splunk_setting:
-            {
-                "host": "10.1.2.3",
-                "port": 80,
-                "token": "a023nsdu123123123",
-                'https': True,              # optional, bool
-                'timeout': 120,             # optional, int
-                'ssl_verify': True,         # optional, bool
-                "sourcetype": "",            # optional, sourcetype
-                "index": "",                # optional, string
-                "source": "",               # optional, string
-            }
         """
 
         super(SyncData, self).__init__()   # remember to call base's init
 
-        assert splunk_setting, ValueError("You need to configure settings of remote target")
-        assert isinstance(splunk_setting, dict), ValueError("The settings should be dict to include necessary address and confidentials.")
+        assert target_setting, ValueError("You need to configure settings of remote target")
+        assert isinstance(target_setting, dict), ValueError("The settings should be dict to include necessary address and confidentials.")
 
-        self.option = splunk_setting
-        self.timeout = self.option.get("timeout", 120)
+        self.option = target_setting
+        self.protocol = self.option['protocol']
+        self.timeout = int(self.option.get('timeout', 120))
+        self.sep = self.option.get('sep', "||")
+        self.host = self.option["host"]
+        self.port = int(self.option.get('port', 514))
+        self.cert_path=self.option.get('cert_path', None)
 
-        # Testing connectivity
-        s = socket.socket()
-        s.settimeout(self.timeout)
-        s.connect((self.option["host"], self.option['port']))
-
-        self.r = requests.session()
-        self.r.max_redirects = 1
-        self.r.verify = self.option.get("ssl_verify", True)
-        self.r.headers['Authorization'] = "Splunk {}".format(self.option['token'])
-        self.url = "{0}://{1}:{2}/services/collector".format("http" if not self.option.get('https') else "https", self.option['host'], self.option['port'])
-
-        self.default_fields = {}
-        if self.option.get("sourcetype"):
-            self.default_fields['sourcetype'] = self.option.get("sourcetype")
-        if self.option.get("source"):
-            self.default_fields['source'] = self.option.get("source")
-        if self.option.get("index"):
-            self.default_fields['index'] = self.option.get("index")
+        # try connection
+        with SyslogClient(self.host, self.port, proto=self.protocol, timeout=self.timeout, cert_path=self.cert_path) as client:
+            pass
 
     def process(self, log_groups, check_point_tracker):
         logs = PullLogResponse.loggroups_to_flattern_list(log_groups, time_as_str=True, decode_bytes=True)
         logger.info("Get data from shard {0}, log count: {1}".format(self.shard_id, len(logs)))
-        for log in logs:
-            # Put your sync code here to send to remote.
-            # the format of log is just a dict with example as below (Note, all strings are unicode):
-            #    Python2: {u"__time__": u"12312312", u"__topic__": u"topic", u"field1": u"value1", u"field2": u"value2"}
-            #    Python3: {"__time__": "12312312", "__topic__": "topic", "field1": "value1", "field2": "value2"}
-            event = {}
-            event.update(self.default_fields)
-            # suppose we only care about audit log
-            event['time'] = log[u'__time__']
-            event['fields'] = {}
-            del log['__time__']
-            event['fields'].update(log)
 
-            data = json.dumps(event, sort_keys=True)
+        try:
+            with SyslogClient(self.host, self.port, proto=self.protocol, timeout=self.timeout, cert_path=self.cert_path) as client:
+                for log in logs:
+                    # Put your sync code here to send to remote.
+                    # the format of log is just a dict with example as below (Note, all strings are unicode):
+                    #    Python2: {"__time__": "12312312", "__topic__": "topic", u"field1": u"value1", u"field2": u"value2"}
+                    #    Python3: {"__time__": "12312312", "__topic__": "topic", "field1": "value1", "field2": "value2"}
+                    # suppose we only care about audit log
+                    timestamp = datetime.fromtimestamp(int(log[u'__time__']))
+                    del log['__time__']
 
-            try:
-                req = self.r.post(self.url, data=data, timeout=self.timeout)
-                req.raise_for_status()
-            except Exception as err:
-                logger.debug("Failed to connect to remote Splunk server ({0}). Exception: {1}".format(self.url, err))
-                raise err
+                    io = six.StringIO()
+                    first = True
+                    for k, v in six.iteritems(log):
+                        io.write("{0}{1}={2}".format(self.sep, k, v))
 
-                # TODO: add some error handling here or retry etc.
+                    data = io.getvalue()
+                    client.log(data, facility=self.option.get("facility", None), severity=self.option.get("severity", None), timestamp=timestamp, program=self.option.get("tag", None), hostname=self.option.get("hostname", None))
+
+        except Exception as err:
+            logger.debug("Failed to connect to remote syslog server ({0}). Exception: {1}".format(self.option, err))
+            # TODO: add some error handling here or retry etc.
+            raise err
 
         logger.info("Complete send data to remote")
 
@@ -125,7 +105,7 @@ def get_monitor_option():
 
     # This options is used for initialization, will be ignored once consumer group is created and each shard has beeen started to be consumed.
     # Could be "begin", "end", "specific time format in ISO", it's log receiving time.
-    cursor_start_time = "2018-12-26 0:0:0"
+    cursor_start_time = "2019-1-1 0:0:0+8:00"
 
     # once a client doesn't report to server * heartbeat_interval * 2 interval, server will consider it's offline and re-assign its task to another consumer.
     # thus  don't set the heatbeat interval too small when the network badwidth or performance of consumtion is not so good.
@@ -141,18 +121,19 @@ def get_monitor_option():
                           heartbeat_interval=heartbeat_interval,
                           data_fetch_interval=data_fetch_interval)
 
-    # monitor options
+    # syslog options
     settings = {
-                "host": "10.1.2.3",
-                "port": 80,
-                "token": "a023nsdu123123123",
-                'https': False,              # optional, bool
-                'timeout': 120,             # optional, int
-                'ssl_verify': True,         # optional, bool
-                "sourcetype": "",            # optional, sourcetype
-                "index": "",                # optional, index
-                "source": "",               # optional, source
-            }
+                "host": "1.2.3.4", # must
+                "port": 514,       # must, port
+                "protocol": "tcp", # must, tcp, udp, tls (py3 only)
+                "sep": "||",      # must, separator for key=value
+                "cert_path": None,  # optional, cert path when TLS is configured
+                "timeout": 120,   # optional, default 120
+                "facility": syslogclient.FAC_USER,  # optional, default None means syslogclient.FAC_USER
+                "severity": syslogclient.SEV_INFO,  # optional, default None means syslogclient.SEV_INFO
+                "hostname": None, # optional, default hostname of local
+                "tag": None # optional, tag for the log, default -
+    }
 
     return option, settings
 

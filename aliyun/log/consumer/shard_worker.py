@@ -8,10 +8,24 @@ from .checkpoint_tracker import ConsumerCheckpointTracker
 
 from .config import ConsumerStatus
 from .fetched_log_group import FetchedLogGroup
-from .tasks import ProcessTaskResult, InitTaskResult, FetchTaskResult
+from .tasks import ProcessTaskResult, InitTaskResult, FetchTaskResult, TaskResult
 from .tasks import consumer_fetch_task, consumer_initialize_task, \
     consumer_process_task, consumer_shutdown_task
 from .exceptions import ClientWorkerException
+import six
+
+
+class ShardConsumerWorkerLoggerAdapter(logging.LoggerAdapter):
+    def process(self, msg, kwargs):
+        shard_consumer_worker = self.extra[
+            'shard_consumer_worker']  # type: ShardConsumerWorker
+        consumer_client = shard_consumer_worker.log_client
+        _id = '/'.join([
+            consumer_client.mproject, consumer_client.mlogstore,
+            consumer_client.mconsumer_group, consumer_client.mconsumer,
+            str(shard_consumer_worker.shard_id)
+        ])
+        return "[{0}]{1}".format(_id, msg), kwargs
 
 
 class ShardConsumerWorker(object):
@@ -41,7 +55,8 @@ class ShardConsumerWorker(object):
         self.last_fetch_time = 0
         self.last_fetch_count = 0
 
-        self.logger = logging.getLogger(__name__)
+        self.logger = ShardConsumerWorkerLoggerAdapter(
+            logging.getLogger(__name__), {"shard_consumer_worker": self})
 
     def consume(self):
         self.logger.debug('consumer start consuming')
@@ -189,12 +204,19 @@ class ShardConsumerWorker(object):
 
     def _sample_log_error(self, result):
         # record the time when error happens
+        if not isinstance(result, TaskResult):
+            return
+
+        exc = result.get_exception()
+        if exc is None:
+            return
+
         current_time = time.time()
-        if result is not None \
-            and result.get_exception() is not None \
-                and current_time - self.last_log_error_time > 5:
-            self.logger.warning(result.get_exception(), exc_info=True)
-            self.last_log_error_time = current_time
+        if current_time - self.last_log_error_time <= 5:
+            return
+
+        self.logger.warning(exc, exc_info=result.exc_info)
+        self.last_log_error_time = current_time
 
     def _update_status(self, task_succcess):
         if self.consumer_status == ConsumerStatus.SHUTTING_DOWN:

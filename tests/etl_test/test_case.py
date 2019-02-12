@@ -8,6 +8,7 @@ import os
 from time import time
 from random import randint
 import six
+import string
 
 t = transform
 
@@ -46,8 +47,8 @@ def test_condition():
     assert not condition([{'k1': r'\d+', 'k3': r'\d+'}])(event)
 
     # dict - lambda
-    assert condition({'k1': str.isdigit})(event)
-    assert condition({'k2': str.islower})(event)
+    assert condition({'k1': unicode.isdigit if six.PY2 else str.isdigit})(event)
+    assert condition({'k2': unicode.islower if six.PY2 else str.islower})(event)
     assert not condition({'k3': lambda x: x.isupper()})(event)
 
     # dict - bool
@@ -57,6 +58,81 @@ def test_condition():
     # lambda
     assert condition(lambda e: 'k1' in e and e['k1'].isdigit())(event)
     assert not condition(lambda e: 'k5' in e)(event)
+
+
+def test_condition_not():
+    event = {'k1': '123', 'k2': 'abc', 'k3': "abc123"}
+
+    # dict - string
+    assert not condition({'k1': NOT(r'\d+')})(event)
+    assert not condition([{'k1': NOT(r'\d+')}])(event)
+    assert not condition({'k2': NOT(r'\w+')})(event)
+    assert condition({'k3': NOT(r'\d+')})(event)
+
+    # dict - or
+    assert condition([{'k1': NOT(r'\d+')}, {'k2': NOT(r'\d+')}])(event)
+    assert not condition([{'k1': NOT(r'\d+')}, {'k4': r'\w+'}])(event)
+
+    # dict - and
+    assert not condition([{'k1': NOT(r'\d+'), 'k2': r'\w+'}])(event)
+    assert condition([{'k1': NOT(r'[a-z]+'), 'k3': NOT(r'\d+')}])(event)
+
+
+def test_v():
+    """
+
+    """
+    #####
+    ### dict mode
+    # fill
+    assert t({'k2': V("k1")})({'k1': 'v1'}) == {'k1': 'v1', 'k2': 'v1'}
+
+    # overwrite
+    assert t({'k2': V("k1")})({'k1': 'v1', 'k2': 'v2'}) == {'k1': 'v1', 'k2': 'v1'}
+
+    # no exist
+    assert t({'k2': V("k3")})({'k1': 'v1'}) == {'k1': 'v1'}
+
+    # no exit and no-change
+    assert t({'k1': V("k3")})({'k1': 'v1'}) == {'k1': 'v1'}
+
+    # coalesce set
+    assert t({'k3': V('k4', 'k1', 'k2')})({'k1': 'v1', 'k2': 'v2'}) == {'k1': 'v1', 'k2': 'v2', 'k3': 'v1'}
+
+    # no exist
+    assert t({'k3': V('k4', 'k5')})({'k1': 'v1', 'k2': 'v2'}) == {'k1': 'v1', 'k2': 'v2'}
+
+    # fill
+    assert t({'k3': V('k3', 'k1', 'k2')})({'k1': 'v1', 'k2': 'v2'}) == {'k1': 'v1', 'k2': 'v2', 'k3': 'v1'}
+
+    # no-change
+    assert t({'k3': V('k3', 'k1', 'k2')})({'k1': 'v1', 'k2': 'v2', 'k3': 'v3'}) == {'k1': 'v1', 'k2': 'v2', 'k3': 'v3'}
+
+    #####
+    ## parameter mode
+    assert t(('k2', V("k1")))({'k1': 'v1'}) == {'k1': 'v1', 'k2': 'v1'}
+
+    # overwrite
+    assert t(('k2', V("k1")))({'k1': 'v1', 'k2': 'v2'}) == {'k1': 'v1', 'k2': 'v1'}
+
+    # no exist
+    assert t(('k2', V("k3")))({'k1': 'v1'}) == {'k1': 'v1'}
+
+    # no exit -- NOTE the difference
+    assert t(('k1', V("k3")))({'k1': 'v1'}) == {}
+
+    # coalesce set
+    assert t(('k3', V('k4', 'k1', 'k2')))({'k1': 'v1', 'k2': 'v2'}) == {'k1': 'v1', 'k2': 'v2', 'k3': 'v1'}
+
+    # no exist
+    assert t(('k3', V('k4', 'k5')))({'k1': 'v1', 'k2': 'v2'}) == {'k1': 'v1', 'k2': 'v2'}
+
+    # fill
+    assert t(('k3', V('k3', 'k1', 'k2')))({'k1': 'v1', 'k2': 'v2'}) == {'k1': 'v1', 'k2': 'v2', 'k3': 'v1'}
+
+    # no-change
+    assert t(('k3', V('k3', 'k1', 'k2')))({'k1': 'v1', 'k2': 'v2', 'k3': 'v3'}) == {'k1': 'v1', 'k2': 'v2', 'k3': 'v3'}
+
 
 def test_regex():
     """
@@ -78,8 +154,10 @@ def test_regex():
 
     # simple
     assert t( ("k1", r"hello (?P<name>\w+)") )({'k1': 'hello ding'}) == {'k1': 'hello ding', 'name': 'ding'}
+
     # multiple
     assert t( ("k1", r"(?i)(?P<word>[a-z]+)(?P<num>\d+)") )({'k1': 'aBc1234'}) == {'k1': 'aBc1234', 'word': 'aBc', 'num': '1234'}
+
     # not match
     assert t( ("k1", r"(?P<abc>\d+)") )({'k1': 'aBc1234'}) == {'k1': 'aBc1234', 'abc': '1234'}
 
@@ -106,6 +184,42 @@ def test_regex():
     # regex 3-tuple dict
     assert t(("k1", r"(\w+):(\d+)", {r"k_\1": r"v_\2"}))({'k1': 'abc:123 xyz:456'}) == {'k1': 'abc:123 xyz:456', 'k_abc': "v_123", "k_xyz": "v_456"}
 
+    #######
+    #### mode
+
+    # mode - default - empty
+    assert t( ("k1", r"hello (?P<name>\w+)") )({'k1': 'hello ding', "name": ""}) == {'k1': 'hello ding', 'name': 'ding'}
+    assert t( ("k1", REGEX(r"hello (?P<name>\w+)", mode='add')) )({'k1': 'hello ding', "name": ""}) == {'k1': 'hello ding', 'name': ''}
+    assert t( ("k1", r"(?i)(?P<word>[a-z]+)(?P<num>\d+)") )({'k1': 'aBc1234', 'num': ''}) == {'k1': 'aBc1234', 'word': 'aBc', 'num': '1234'}
+    assert t(("k1", r"(\w+) (\d+)", ["f1", "f2"]))({'k1': 'abc 123', "f2": ""}) == {'k1': 'abc 123', 'f1': "abc", "f2": "123"}
+    assert t(("k1", r"(\w+):(\d+)", {r"k_\1": r"v_\2"}))({'k1': 'abc:123 xyz:456', "k_xyz": ""}) == {'k1': 'abc:123 xyz:456', 'k_abc': "v_123", "k_xyz": "v_456"}
+    assert t(("k1", REGEX(r"(\w+):(\d+)", {r"k_\1": r"v_\2"}, mode='add')))({'k1': 'abc:123 xyz:456', "k_xyz": ""}) == {'k1': 'abc:123 xyz:456', 'k_abc': "v_123", "k_xyz": ""}
+
+    # mode - default - non-exit (skip, cause as above)
+
+    # mode - default - non-empty
+    assert t( ("k1", r"hello (?P<name>\w+)") )({'k1': 'hello ding', "name": "xx"}) == {'k1': 'hello ding', 'name': 'xx'}
+    assert t( ("k1", r"(?i)(?P<word>[a-z]+)(?P<num>\d+)") )({'k1': 'aBc1234', 'num': 'xx'}) == {'k1': 'aBc1234', 'word': 'aBc', 'num': 'xx'}
+    assert t( ("k1", REGEX(r"(?i)(?P<word>[a-z]+)(?P<num>\d+)", mode='overwrite')) )({'k1': 'aBc1234', 'num': 'xx'}) == {'k1': 'aBc1234', 'word': 'aBc', 'num': '1234'}
+    assert t(("k1", r"(\w+) (\d+)", ["f1", "f2"]))({'k1': 'abc 123', "f2": "xx"}) == {'k1': 'abc 123', 'f1': "abc", "f2": "xx"}
+    assert t(("k1", REGEX(r"(\w+) (\d+)", ["f1", "f2"], mode='overwrite')))({'k1': 'abc 123', "f2": "xx"}) == {'k1': 'abc 123', 'f1': "abc", "f2": "123"}
+    assert t(("k1", r"(\w+):(\d+)", {r"k_\1": r"v_\2"}))({'k1': 'abc:123 xyz:456', "k_xyz": "xx"}) == {'k1': 'abc:123 xyz:456', 'k_abc': "v_123", "k_xyz": "xx"}
+    assert t(("k1", REGEX(r"(\w+):(\d+)", {r"k_\1": r"v_\2"}, mode='overwrite')))({'k1': 'abc:123 xyz:456', "k_xyz": "xx"}) == {'k1': 'abc:123 xyz:456', 'k_abc': "v_123", "k_xyz": "v_456"}
+
+    # mode - default - dest empty
+    assert t(("k1", r"hello (?P<name>\w*)"))({'k1': 'hello '}) == {'k1': 'hello '}
+    assert t(("k1", REGEX(r"hello (?P<name>\w*)", mode='fill')))({'k1': 'hello '}) == {'k1': 'hello ', "name": ""}
+
+    assert t(("k1", r"(?i)(?P<word>[a-z]+)(?P<num>\d*)"))({'k1': 'aBc'}) == {'k1': 'aBc', 'word': 'aBc'}
+    assert t(("k1", REGEX(r"(?i)(?P<word>[a-z]+)(?P<num>\d*)", mode="overwrite")))({'k1': 'aBc'}) == {'k1': 'aBc', 'word': 'aBc', 'num': ""}
+    assert t(("k1", r"(\w+) xx(\d*)", ["f1", "f2"]))({'k1': 'abc xx'}) == {'k1': 'abc xx', 'f1': "abc"}
+    assert t(("k1", r"(\w+):(\d+)", {r"\1": r"\2"}))({'k1': '123:123 xyz:456'}) == {'k1': '123:123 xyz:456',
+                                                                                        "xyz": "456"}
+    assert t(("k1", r"(\w+):(\d*)", {r"\1": r"\2"}))({'k1': 'abc: xyz:456'}) == {'k1': 'abc: xyz:456',
+                                                                                        "xyz": "456"}
+    assert t(("k1", REGEX(r"(\w+):(\d*)", {r"\1": r"\2"}, mode="add")))({'k1': 'abc: xyz:456'}) == {'k1': 'abc: xyz:456',
+                                                                                                    "abc": "",
+                                                                                                    "xyz": "456"}
 
 def test_dispatch_transform():
     DISPATCH_LIST_data = [
@@ -178,7 +292,7 @@ def test_dispatch_transform():
     d1 = t([("data", JSON(jmes=version_jmes, output='version'))])(d1)
     d1 = t({"product_version": ZIP("product", "version")})(d1)
     d1 = t(("product_version", SPLIT))(d1)
-    d1 = t(("product_version", CSV("product,version", sep="#")))(d1)
+    d1 = t(("product_version", CSV("product,version", sep="#", mode='overwrite')))(d1)
     d1 = t(DROP_F('data|product_version'))(d1)
     d1 = t([("version", SPLIT(jmes=version_data_jmes, output='version'))])(d1)
 
@@ -374,6 +488,39 @@ def test_csv():
     # PSV
     assert t( ("data", PSV(r"city,pop,province") ))({'data': 'nj|800|js'})  == {'province': 'js', 'city': 'nj', 'data': 'nj|800|js', 'pop': '800'}
 
+    ####
+    ## Mode
+    # mode - default - src empty
+    assert t( ("data", CSV(r"city,pop,province") ))({'data': 'nj,800,js', 'city': ''})  == {'province': 'js', 'city': 'nj', 'data': 'nj,800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="overwrite") ))({'data': 'nj,800,js', 'city': ''})  == {'province': 'js', 'city': 'nj', 'data': 'nj,800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="overwrite-auto") ))({'data': 'nj,800,js', 'city': ''})  == {'province': 'js', 'city': 'nj', 'data': 'nj,800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="add") ))({'data': 'nj,800,js', 'city': ''})  == {'province': 'js', 'city': '', 'data': 'nj,800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="add-auto") ))({'data': 'nj,800,js', 'city': ''})  == {'province': 'js', 'city': '', 'data': 'nj,800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="fill") ))({'data': 'nj,800,js', 'city': ''})  == {'province': 'js', 'city': 'nj', 'data': 'nj,800,js', 'pop': '800'}
+
+    # mode - default - src non-exit
+    assert t( ("data", CSV(r"city,pop,province", mode="add") ))({'data': 'nj,800,js'})  == {'province': 'js', 'city': 'nj', 'data': 'nj,800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="fill") ))({'data': 'nj,800,js'})  == {'province': 'js', 'city': 'nj', 'data': 'nj,800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="overwrite") ))({'data': 'nj,800,js'})  == {'province': 'js', 'city': 'nj', 'data': 'nj,800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="overwrite-auto") ))({'data': 'nj,800,js'})  == {'province': 'js', 'city': 'nj', 'data': 'nj,800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="add-auto") ))({'data': 'nj,800,js'})  == {'province': 'js', 'city': 'nj', 'data': 'nj,800,js', 'pop': '800'}
+
+    # mode - default - src non-empty
+    assert t( ("data", CSV(r"city,pop,province") ))({'data': 'nj,800,js', 'city': 'nanjing'})  == {'province': 'js', 'city': 'nanjing', 'data': 'nj,800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="overwrite") ))({'data': 'nj,800,js', 'city': 'nanjing'})  == {'province': 'js', 'city': 'nj', 'data': 'nj,800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="overwrite-auto") ))({'data': 'nj,800,js', 'city': 'nanjing'})  == {'province': 'js', 'city': 'nj', 'data': 'nj,800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="add") ))({'data': 'nj,800,js', 'city': 'nanjing'})  == {'province': 'js', 'city': 'nanjing', 'data': 'nj,800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="add-auto") ))({'data': 'nj,800,js', 'city': 'nanjing'})  == {'province': 'js', 'city': 'nanjing', 'data': 'nj,800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="fill") ))({'data': 'nj,800,js', 'city': 'nanjing'})  == {'province': 'js', 'city': 'nanjing', 'data': 'nj,800,js', 'pop': '800'}
+
+    # mode - default - dest empty
+    assert t( ("data", CSV(r"city,pop,province") ))({'data': ',800,js', 'city': 'nanjing'})  == {'province': 'js', 'city': 'nanjing', 'data': ',800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="overwrite") ))({'data': ',800,js', 'city': 'nanjing'})  == {'province': 'js', 'city': '', 'data': ',800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="overwrite-auto") ))({'data': ',800,js', 'city': 'nanjing'})  == {'province': 'js', 'city': 'nanjing', 'data': ',800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="add") ))({'data': ',800,js', 'city': 'nanjing'})  == {'province': 'js', 'city': 'nanjing', 'data': ',800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="add-auto") ))({'data': ',800,js', 'city': 'nanjing'})  == {'province': 'js', 'city': 'nanjing', 'data': ',800,js', 'pop': '800'}
+    assert t( ("data", CSV(r"city,pop,province", mode="fill") ))({'data': ',800,js', 'city': 'nanjing'})  == {'province': 'js', 'city': 'nanjing', 'data': ',800,js', 'pop': '800'}
+
 
 def test_lookup_dict():
     # no field
@@ -398,7 +545,43 @@ def test_lookup_dict():
     # multiple inputs
     assert t((["pro", "protocol"], LOOKUP({"http": "tcp", "dns": "udp", "https": "tcp"}, "type")))({'data': '123', "pro": "http"}) == {'data': '123', "pro": "http", "type": "tcp"}
     assert t((["pro", "protocol"], LOOKUP({"http": "tcp", "dns": "udp", "https": "tcp"}, "type")))({'data': '123', "protocol": "http"}) == {'data': '123', "protocol": "http", "type": "tcp"}
-    assert t((["pro", "protocol"], LOOKUP({"http": "tcp", "dns": "udp", "https": "tcp"}, "type")))({'data': '123', "pro": "dns", "protocol": "http"}) == {'data': '123', "pro": "dns", "protocol": "http", "type": "tcp"}
+    assert t((["pro", "protocol"], LOOKUP({"http": "tcp", "dns": "udp", "https": "tcp"}, "type", mode='overwrite')))({'data': '123', "pro": "dns", "protocol": "http"}) == {'data': '123', "pro": "dns", "protocol": "http", "type": "tcp"}
+
+    ####
+    ## Mode
+    # mode - default - src empty
+    assert t( ("pro", LOOKUP({"1": "TCP", "2": "UDP", "3": "HTTP"}, "protocol") ) )({'data': '123', "pro": "1", "protocol": ""})  == {'data': '123', "pro": "1", "protocol": "TCP"}
+    assert t( ("pro", LOOKUP({"1": "TCP", "2": "UDP", "3": "HTTP"}, "protocol", mode="overwrite") ) )({'data': '123', "pro": "1", "protocol": ""})  == {'data': '123', "pro": "1", "protocol": "TCP"}
+    assert t( ("pro", LOOKUP({"1": "TCP", "2": "UDP", "3": "HTTP"}, "protocol", mode="overwrite-auto") ) )({'data': '123', "pro": "1", "protocol": ""})  == {'data': '123', "pro": "1", "protocol": "TCP"}
+    assert t( ("pro", LOOKUP({"1": "TCP", "2": "UDP", "3": "HTTP"}, "protocol", mode="add") ) )({'data': '123', "pro": "1", "protocol": ""})  == {'data': '123', "pro": "1", "protocol": ""}
+    assert t( ("pro", LOOKUP({"1": "TCP", "2": "UDP", "3": "HTTP"}, "protocol", mode="add-auto") ) )({'data': '123', "pro": "1", "protocol": ""})  == {'data': '123', "pro": "1", "protocol": ""}
+    assert t( ("pro", LOOKUP({"1": "TCP", "2": "UDP", "3": "HTTP"}, "protocol", mode="fill") ) )({'data': '123', "pro": "1", "protocol": ""})  == {'data': '123', "pro": "1", "protocol": "TCP"}
+
+    # mode - default - src non-exit
+    assert t( ("pro", LOOKUP({"1": "TCP", "2": "UDP", "3": "HTTP"}, "protocol", mode="overwrite") ) )({'data': '123', "pro": "1"})  == {'data': '123', "pro": "1", "protocol": "TCP"}
+    assert t( ("pro", LOOKUP({"1": "TCP", "2": "UDP", "3": "HTTP"}, "protocol", mode="overwrite-auto") ) )({'data': '123', "pro": "1"})  == {'data': '123', "pro": "1", "protocol": "TCP"}
+    assert t( ("pro", LOOKUP({"1": "TCP", "2": "UDP", "3": "HTTP"}, "protocol", mode="add") ) )({'data': '123', "pro": "1"})  == {'data': '123', "pro": "1", "protocol": "TCP"}
+    assert t( ("pro", LOOKUP({"1": "TCP", "2": "UDP", "3": "HTTP"}, "protocol", mode="add-auto") ) )({'data': '123', "pro": "1"})  == {'data': '123', "pro": "1", "protocol": "TCP"}
+    assert t( ("pro", LOOKUP({"1": "TCP", "2": "UDP", "3": "HTTP"}, "protocol", mode="fill") ) )({'data': '123', "pro": "1"})  == {'data': '123', "pro": "1", "protocol": "TCP"}
+
+    # mode - default - src non-empty
+    assert t( ("pro", LOOKUP({"1": "TCP", "2": "UDP", "3": "HTTP"}, "protocol") ) )({'data': '123', "pro": "1", "protocol": "SNMP"})  == {'data': '123', "pro": "1", "protocol": "SNMP"}
+    assert t( ("pro", LOOKUP({"1": "TCP", "2": "UDP", "3": "HTTP"}, "protocol", mode="overwrite") ) )({'data': '123', "pro": "1", "protocol": "SNMP"})  == {'data': '123', "pro": "1", "protocol": "TCP"}
+    assert t( ("pro", LOOKUP({"1": "TCP", "2": "UDP", "3": "HTTP"}, "protocol", mode="overwrite-auto") ) )({'data': '123', "pro": "1", "protocol": "SNMP"})  == {'data': '123', "pro": "1", "protocol": "TCP"}
+    assert t( ("pro", LOOKUP({"1": "TCP", "2": "UDP", "3": "HTTP"}, "protocol", mode="add") ) )({'data': '123', "pro": "1", "protocol": "SNMP"})  == {'data': '123', "pro": "1", "protocol": "SNMP"}
+    assert t( ("pro", LOOKUP({"1": "TCP", "2": "UDP", "3": "HTTP"}, "protocol", mode="add-auto") ) )({'data': '123', "pro": "1", "protocol": "SNMP"})  == {'data': '123', "pro": "1", "protocol": "SNMP"}
+    assert t( ("pro", LOOKUP({"1": "TCP", "2": "UDP", "3": "HTTP"}, "protocol", mode="fill") ) )({'data': '123', "pro": "1", "protocol": "SNMP"})  == {'data': '123', "pro": "1", "protocol": "SNMP"}
+
+    # mode - default - dest empty
+    assert t( ("pro", LOOKUP({"1": "", "2": "UDP", "3": "HTTP"}, "protocol") ) )({'data': '123', "pro": "1", "protocol": "SNMP"})  == {'data': '123', "pro": "1", "protocol": "SNMP"}
+    assert t( ("pro", LOOKUP({"1": "", "2": "UDP", "3": "HTTP"}, "protocol", mode="overwrite") ) )({'data': '123', "pro": "1", "protocol": "SNMP"})  == {'data': '123', "pro": "1", "protocol": ""}
+    assert t( ("pro", LOOKUP({"1": "", "2": "UDP", "3": "HTTP"}, "protocol", mode="overwrite-auto") ) )({'data': '123', "pro": "1", "protocol": "SNMP"})  == {'data': '123', "pro": "1", "protocol": "SNMP"}
+    assert t( ("pro", LOOKUP({"1": "", "2": "UDP", "3": "HTTP"}, "protocol", mode="add") ) )({'data': '123', "pro": "1", "protocol": "SNMP"})  == {'data': '123', "pro": "1", "protocol": "SNMP"}
+    assert t( ("pro", LOOKUP({"1": "", "2": "UDP", "3": "HTTP"}, "protocol", mode="add-auto") ) )({'data': '123', "pro": "1", "protocol": "SNMP"})  == {'data': '123', "pro": "1", "protocol": "SNMP"}
+    assert t( ("pro", LOOKUP({"1": "", "2": "UDP", "3": "HTTP"}, "protocol", mode="fill") ) )({'data': '123', "pro": "1", "protocol": "SNMP"})  == {'data': '123', "pro": "1", "protocol": "SNMP"}
+
+
+
 
 
 import atexit
@@ -524,46 +707,116 @@ def test_lookup_mapping():
     assert t( (["c1", "c2"], LOOKUP(csv_path, ["d1", "d2"]) ) )({'data': '123', 'c1': 'c', 'c2': 'v'})  == {'data': '123', 'c1': 'c', 'c2': 'v', 'd1': '0', 'd2': '0'}
 
 
+    #######
+    ## Mode
+    # mode - default - empty
+    csv_path = _pre_csv("city,pop,province\nnj,800,js\nsh,2000,sh")
+    assert t( ("city", LOOKUP(csv_path, "province") ))({'data': '123', 'city': 'nj', 'province': ''}) == {'data': '123', 'city': 'nj', 'province': 'js'}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="overwrite") ))({'data': '123', 'city': 'nj', 'province': ''}) == {'data': '123', 'city': 'nj', 'province': 'js'}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="overwrite-auto") ))({'data': '123', 'city': 'nj', 'province': ''}) == {'data': '123', 'city': 'nj', 'province': 'js'}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="add") ))({'data': '123', 'city': 'nj', 'province': ''}) == {'data': '123', 'city': 'nj', 'province': ''}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="add-auto") ))({'data': '123', 'city': 'nj', 'province': ''}) == {'data': '123', 'city': 'nj', 'province': ''}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="fill") ))({'data': '123', 'city': 'nj', 'province': ''}) == {'data': '123', 'city': 'nj', 'province': 'js'}
+
+    # mode - default - non-exit
+    assert t( ("city", LOOKUP(csv_path, "province", mode="add") ))({'data': '123', 'city': 'nj'})  == {'data': '123', 'city': 'nj', 'province': 'js'}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="fill") ))({'data': '123', 'city': 'nj'})  == {'data': '123', 'city': 'nj', 'province': 'js'}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="overwrite") ))({'data': '123', 'city': 'nj'})  == {'data': '123', 'city': 'nj', 'province': 'js'}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="overwrite-auto") ))({'data': '123', 'city': 'nj'})  == {'data': '123', 'city': 'nj', 'province': 'js'}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="add-auto") ))({'data': '123', 'city': 'nj'})  == {'data': '123', 'city': 'nj', 'province': 'js'}
+
+    # mode - default - non-empty
+    assert t( ("city", LOOKUP(csv_path, "province") ))({'data': '123', 'city': 'nj', 'province': 'JiangSu'}) == {'data': '123', 'city': 'nj', 'province': 'JiangSu'}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="overwrite") ))({'data': '123', 'city': 'nj', 'province': 'JiangSu'}) == {'data': '123', 'city': 'nj', 'province': 'js'}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="overwrite-auto") ))({'data': '123', 'city': 'nj', 'province': 'JiangSu'}) == {'data': '123', 'city': 'nj', 'province': 'js'}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="add") ))({'data': '123', 'city': 'nj', 'province': 'JiangSu'}) == {'data': '123', 'city': 'nj', 'province': 'JiangSu'}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="add-auto") ))({'data': '123', 'city': 'nj', 'province': 'JiangSu'}) == {'data': '123', 'city': 'nj', 'province': 'JiangSu'}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="fill") ))({'data': '123', 'city': 'nj', 'province': 'JiangSu'}) == {'data': '123', 'city': 'nj', 'province': 'JiangSu'}
+
+    # mode - default - dest empty
+    csv_path = _pre_csv("city,pop,province\nnj,800,\nsh,2000,sh")
+    assert t( ("city", LOOKUP(csv_path, "province") ))({'data': '123', 'city': 'nj'}) == {'data': '123', 'city': 'nj'}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="overwrite") ))({'data': '123', 'city': 'nj'}) == {'data': '123', 'city': 'nj', 'province': ''}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="overwrite-auto") ))({'data': '123', 'city': 'nj'}) == {'data': '123', 'city': 'nj'}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="add") ))({'data': '123', 'city': 'nj'}) == {'data': '123', 'city': 'nj', 'province': ''}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="add-auto") ))({'data': '123', 'city': 'nj'}) == {'data': '123', 'city': 'nj'}
+    assert t( ("city", LOOKUP(csv_path, "province", mode="fill") ))({'data': '123', 'city': 'nj'}) == {'data': '123', 'city': 'nj', 'province': ''}
+
+
 def test_kv():
     # verify the KV extract pattern match
     d1 = {"data": "i=c1, k1=v1,k2=v2 k3=v3"}
     assert t( ("data", KV) )(d1) == {'i': 'c1', 'k2': 'v2', 'k1': 'v1', 'k3': 'v3', 'data': 'i=c1, k1=v1,k2=v2 k3=v3'}
+    assert t( ("data", KV(escape=True)) )(d1) == {'i': 'c1', 'k2': 'v2', 'k1': 'v1', 'k3': 'v3', 'data': 'i=c1, k1=v1,k2=v2 k3=v3'}
 
     d2 = {"data": 'i=c2, k1=" v 1 ", k2="v 2" k3="~!@#=`;.>"'}
     assert t(("data", KV))(d2) == {'i': 'c2', 'k2': 'v 2', 'k1': 'v 1', 'k3': '~!@#=`;.>', 'data': 'i=c2, k1=" v 1 ", k2="v 2" k3="~!@#=`;.>"'}
+    assert t(("data", KV(escape=True)))(d2) == {'i': 'c2', 'k2': 'v 2', 'k1': 'v 1', 'k3': '~!@#=`;.>', 'data': 'i=c2, k1=" v 1 ", k2="v 2" k3="~!@#=`;.>"'}
+
+    # keyword char set
+    d2 = {"data": 'i=c2, k1=" v 1 " 3=4  3k=100 s= , 1=2'}
+    assert t(("data", KV))(d2) == {'i': 'c2', 'k1': 'v 1', 'data': 'i=c2, k1=" v 1 " 3=4  3k=100 s= , 1=2'}
+    assert t(("data", KV(escape=True)))(d2) == {'i': 'c2', 'k1': 'v 1', 'data': 'i=c2, k1=" v 1 " 3=4  3k=100 s= , 1=2'}
+
+    # keyword char set
+    d2 = {"data": 'a=1b=2'}
+    assert t(("data", KV))(d2) == {'a': '1b', "data": 'a=1b=2'}
+    assert t(("data", KV(escape=True)))(d2) == {'a': '1b', "data": 'a=1b=2'}
+
+    ##### Mode
+    # mode - default - empty
+    d2 = {"data": 'a=100', "a": ""}
+    assert t(("data", KV))(d2) == {"data": 'a=100', "a": "100"}
+    assert t(("data", KV(mode="overwrite")))(d2) == {"data": 'a=100', "a": "100"}
+    assert t(("data", KV(mode="overwrite-auto")))(d2) == {"data": 'a=100', "a": "100"}
+    assert t(("data", KV(mode="add")))(d2) == {"data": 'a=100', "a": ""}
+    assert t(("data", KV(mode="add-auto")))(d2) == {"data": 'a=100', "a": ""}
+    assert t(("data", KV(mode="fill")))(d2) == {"data": 'a=100', "a": "100"}
+
+    # mode - default - non-exit
+    d2 = {"data": 'a=100'}
+    assert t(("data", KV))(d2) == {"data": 'a=100', "a": "100"}
+    assert t(("data", KV(mode="add")))(d2) == {"data": 'a=100', "a": "100"}
+    assert t(("data", KV(mode="fill")))(d2) == {"data": 'a=100', "a": "100"}
+    assert t(("data", KV(mode="overwrite")))(d2) == {"data": 'a=100', "a": "100"}
+    assert t(("data", KV(mode="overwrite-auto")))(d2) == {"data": 'a=100', "a": "100"}
+    assert t(("data", KV(mode="add-auto")))(d2) == {"data": 'a=100', "a": "100"}
+
+    # mode - default - non-empty
+    d2 = {"data": 'a=100', "a": "200"}
+    assert t(("data", KV))(d2) == {"data": 'a=100', "a": "200"}
+    assert t(("data", KV(mode="add")))(d2) == {"data": 'a=100', "a": "200"}
+    assert t(("data", KV(mode="fill")))(d2) == {"data": 'a=100', "a": "200"}
+    assert t(("data", KV(mode="overwrite")))(d2) == {"data": 'a=100', "a": "100"}
+    assert t(("data", KV(mode="overwrite-auto")))(d2) == {"data": 'a=100', "a": "100"}
+    assert t(("data", KV(mode="add-auto")))(d2) == {"data": 'a=100', "a": "200"}
+
+    # mode - default - dest empty
+    d2 = {"data": 'a=" "', "a": "200"}
+    assert t(("data", KV))(d2) == {"data": 'a=" "', "a": "200"}
+    assert t(("data", KV(mode="add")))(d2) == {"data": 'a=" "', "a": "200"}
+    assert t(("data", KV(mode="fill")))(d2) == {"data": 'a=" "', "a": "200"}
+    assert t(("data", KV(mode="overwrite")))(d2) == {"data": 'a=" "', "a": ""}
+    assert t(("data", KV(mode="overwrite-auto")))(d2) == {"data": 'a=" "', "a": "200"}
+    assert t(("data", KV(mode="add-auto")))(d2) == {"data": 'a=" "', "a": "200"}
 
     # multi-bytes check
-    if six.PY2:
-        d3 = {"data": u'i=c3, k1=你好 k2=他们'.encode('utf8')}
-        assert t(("data", KV))(d3) == {'i': 'c3', 'k2': u'他们'.encode('utf8'), 'k1': u'你好'.encode('utf8'), "data": u'i=c3, k1=你好 k2=他们'.encode('utf8')}
+    d3 = {"data": u'i=c3, k1=你好 k2=他们'}
+    assert t(("data", KV))(d3) == {'i': 'c3', 'k2': u'他们', 'k1': u'你好', "data": u'i=c3, k1=你好 k2=他们'}
+    assert t(("data", KV(mode="add-auto")))(d3) == {'i': 'c3', 'k2': u'他们', 'k1': u'你好', "data": u'i=c3, k1=你好 k2=他们'}
 
-        d4 = {"data": u'i=c4, 姓名=小明 年龄=中文 '.encode('utf8')}
-        assert t(("data", KV))(d4) == {'i': 'c4', u'姓名'.encode('utf8'): u'小明'.encode('utf8'), u'年龄'.encode('utf8'): u'中文'.encode('utf8'), "data": u'i=c4, 姓名=小明 年龄=中文 '.encode('utf8')}
+    d4 = {"data": u'i=c4, 姓名=小明 年龄=中文 '}
+    assert t(("data", KV))(d4) == {'i': 'c4', u'姓名': u'小明', u'年龄': u'中文', "data": u'i=c4, 姓名=小明 年龄=中文 '}
 
-        d5 = {"data": u'i=c5, 姓名="小明" 年龄="中文" '.encode('utf8')}
-        assert t(("data", KV))(d5) == {'i': 'c5', u'姓名'.encode('utf8'): u'小明'.encode('utf8'), u'年龄'.encode('utf8'): u'中文'.encode('utf8'), "data": u'i=c5, 姓名="小明" 年龄="中文" '.encode('utf8')}
+    d5 = {"data": u'i=c5, 姓名="小明" 年龄="中文" '}
+    assert t(("data", KV))(d5) == {'i': 'c5', u'姓名': u'小明', u'年龄': u'中文', "data": u'i=c5, 姓名="小明" 年龄="中文" '}
 
-        d6 = {"data": u'i=c6, 姓名=小明 年龄=中文'}
-        assert t(("data", KV))(d6) == {'i': 'c6', u'姓名'.encode('utf8'): u'小明'.encode('utf8'), u'年龄'.encode('utf8'): u'中文'.encode('utf8'), "data": u'i=c6, 姓名=小明 年龄=中文'}
+    d6 = {"data": u'i=c6, 姓名=小明 年龄=中文'}
+    assert t(("data", KV))(d6) == {'i': 'c6', u'姓名': u'小明', u'年龄': u'中文', "data": u'i=c6, 姓名=小明 年龄=中文'}
 
-        d7 = {"data": u'i=c7, 姓名="小明" 年龄=中文 '}
-        assert t(("data", KV))(d7) == {'i': 'c7', u'姓名'.encode('utf8'): u'小明'.encode('utf8'), u'年龄'.encode('utf8'): u'中文'.encode('utf8'), "data": u'i=c7, 姓名="小明" 年龄=中文 '}
-    else:
-        d3 = {"data": u'i=c3, k1=你好 k2=他们'.encode('utf8')}
-        assert t(("data", KV))(d3) == {'i': 'c3', 'k2': u'他们', 'k1': u'你好', "data": u'i=c3, k1=你好 k2=他们'.encode('utf8')}
-
-        d4 = {"data": u'i=c4, 姓名=小明 年龄=中文 '.encode('utf8')}
-        assert t(("data", KV))(d4) == {'i': 'c4', u'姓名': u'小明', u'年龄': u'中文', "data": u'i=c4, 姓名=小明 年龄=中文 '.encode('utf8')}
-
-        d5 = {"data": u'i=c5, 姓名="小明" 年龄="中文" '.encode('utf8')}
-        assert t(("data", KV))(d5) == {'i': 'c5', u'姓名': u'小明', u'年龄': u'中文', "data": u'i=c5, 姓名="小明" 年龄="中文" '.encode('utf8')}
-
-        d6 = {"data": u'i=c6, 姓名=小明 年龄=中文'}
-        assert t(("data", KV))(d6) == {'i': 'c6', u'姓名': u'小明', u'年龄': u'中文', "data": u'i=c6, 姓名=小明 年龄=中文'}
-
-        d7 = {"data": u'i=c7, 姓名="小明" 年龄=中文 '}
-        assert t(("data", KV))(d7) == {'i': 'c7', u'姓名': u'小明', u'年龄': u'中文', "data": u'i=c7, 姓名="小明" 年龄=中文 '}
-
+    d7 = {"data": u'i=c7, 姓名="小明" 年龄=中文 '}
+    assert t(("data", KV))(d7) == {'i': 'c7', u'姓名': u'小明', u'年龄': u'中文', "data": u'i=c7, 姓名="小明" 年龄=中文 '}
+    assert t(("data", KV(mode="add-auto")))(d7) == {'i': 'c7', u'姓名': u'小明', u'年龄': u'中文', "data": u'i=c7, 姓名="小明" 年龄=中文 '}
 
     # new line in value
     d8 = {"data": """i=c8, k1="hello
@@ -586,6 +839,7 @@ def test_kv():
     # prefix/suffix
     d11 = {"data": "i=c11, k1=v1,k2=v2 k3=v3"}
     assert t( ("data", KV(prefix="d_", suffix="_e")) )(d11) == {'d_i_e': 'c11', 'd_k3_e': 'v3', 'd_k2_e': 'v2', 'data': 'i=c11, k1=v1,k2=v2 k3=v3', 'd_k1_e': 'v1'}
+    assert t( ("data", KV(prefix="d_", suffix="_e", escape=True)) )(d11) == {'d_i_e': 'c11', 'd_k3_e': 'v3', 'd_k2_e': 'v2', 'data': 'i=c11, k1=v1,k2=v2 k3=v3', 'd_k1_e': 'v1'}
 
     # multiple inputs
     d12 = {"data1": "i=c12, k1=v1", "data2": "k2=v2 k3=v3", "data3": "k4=v4"}
@@ -599,6 +853,21 @@ def test_kv():
 
     d14 = {"data1": "i=c14, k1=v1", "data2": "k2=v2 k3=v3", "data3": "k4=v4"}
     assert KV_F(r'data2')(d14) == {'k3': 'v3', 'k2': 'v2', 'data1': 'i=c14, k1=v1', 'data3': 'k4=v4', 'data2': 'k2=v2 k3=v3'}
+
+    ####
+    # auto escape
+    d2 = {"data": r'a=b, k1=" v \"1 2 3", c=d'}
+    assert t(("data", KV))(d2) == {"data": r'a=b, k1=" v \"1 2 3", c=d', "a": "b", "c": "d", "k1": 'v \\'}
+
+    d2 = {"data": r'a=b, k1=" v \"1 2 3", c=d'}
+    # print(t(("data", KV(escape=True)))(d2))
+    assert t(("data", KV(escape=True)))(d2) == {"data": r'a=b, k1=" v \"1 2 3", c=d', "a": "b", "c": "d", "k1": 'v "1 2 3'}
+
+    d10 = {"data": r"i=c10 a='k1=k2\';k2=k3'"}
+    assert t(("data", KV(quote="'")))(d10) == {'i': 'c10', 'a': 'k1=k2\\', "k2": "k3", 'data': r"i=c10 a='k1=k2\';k2=k3'"}
+
+    d10 = {"data": r"i=c10 a='k1=k2\';k2=k3'"}
+    assert t(("data", KV(quote="'", escape=True)))(d10) == {'i': 'c10', 'a': "k1=k2';k2=k3", 'data': r"i=c10 a='k1=k2\';k2=k3'"}
 
 
 def test_split():
@@ -665,24 +934,24 @@ def test_json_filter():
     # jmes filter
     d1 = {'i': '1', 'data': _get_file_content('json_data/CVE-2013-0169.json')}
     jmes = 'join(`,`,cve.affects.vendor.vendor_data[*].product.product_data[*].product_name[])'
-    assert t( ("data", JSON(jmes=jmes, output='data')) )(d1) == {"i": "1", 'data':  "openssl,openjdk,polarssl"}
+    assert t( ("data", JSON(jmes=jmes, output='data', mode='overwrite-auto')) )(d1) == {"i": "1", 'data':  "openssl,openjdk,polarssl"}
 
     # jmes filter - real match, empty result
     d1 = {'i': '1', 'data': '{"f1": ""}'}
     jmes = 'f1'
-    assert t( ("data", JSON(jmes=jmes, output='data')) )(d1) == {'i': '1', 'data': ''}
+    assert t( ("data", JSON(jmes=jmes, output='data', mode='overwrite')) )(d1) == {'i': '1', 'data': ''}
 
     # jmes filter 1 option: jmes_ignore_none
     d1 = {'i': '1', 'data': '{"f1": [1,2,3]}'}
     jmes = 'f1[4]'
     assert t( ("data", JSON(jmes=jmes, output='data')) )(d1) == {'i': '1', 'data': '{"f1": [1,2,3]}'}
-    assert t(("data", JSON(jmes=jmes, output='data', jmes_ignore_none=False)))(d1) == {'i': '1', 'data': ''}
+    assert t(("data", JSON(jmes=jmes, output='data', jmes_ignore_none=False, mode='overwrite')))(d1) == {'i': '1', 'data': ''}
 
     # jmes filter 2 option: jmes_ignore_none
     d1 = {'i': '1', 'data': '{"f1": "123"}'}
     jmes = 'f2'
     assert t( ("data", JSON(jmes=jmes, output='data')) )(d1) == {'i': '1', 'data': '{"f1": "123"}'}
-    assert t(("data", JSON(jmes=jmes, output='data', jmes_ignore_none=False)))(d1) == {'i': '1', 'data': ''}
+    assert t(("data", JSON(jmes=jmes, output='data', jmes_ignore_none=False, mode='overwrite')))(d1) == {'i': '1', 'data': ''}
 
     # jmes filter - output
     d1 = {"data": """{"k1": 100, "k2": 200}"""}
@@ -762,7 +1031,7 @@ def test_json_expand():
 
     # extract - array
     d3 = {"data": """[1,2,3]"""}
-    assert t( ("data", JSON(expand_array=False)) )(d3) == {"data": """[1, 2, 3]"""}
+    assert t( ("data", JSON(expand_array=False)) )(d3) == {"data": """[1,2,3]"""}
 
     # extract - array - expand
     d3 = {"data": """[1,2,3]"""}
@@ -782,7 +1051,37 @@ def test_json_expand():
         'people-2.name': 'xt', 'people-2.sex': 'girl'}
 
 
+    ######
+    ## Mode
+
+    # src empty
+    d1 = {"data": """{"k1": 100, "k2": 200}""", "k2": ""}
+    assert t(("data", JSON))(d1) == {"data": """{"k1": 100, "k2": 200}""", "k1": "100", "k2": "200"}
+
+    d1 = {"data": """{"k1": 100, "k2": 200}""", "k2": ""}
+    assert t(("data", JSON(mode="add")))(d1) == {"data": """{"k1": 100, "k2": 200}""", "k1": "100", "k2": ""}
+
+    # src not empty
+    d1 = {"data": """{"k1": 100, "k2": 200}""", "k2": "xx"}
+    assert t(("data", JSON))(d1) == {"data": """{"k1": 100, "k2": 200}""", "k1": "100", "k2": "xx"}
+
+    d1 = {"data": """{"k1": 100, "k2": 200}""", "k2": "xx"}
+    assert t(("data", JSON(mode="overwrite")))(d1) == {"data": """{"k1": 100, "k2": 200}""", "k1": "100", "k2": "200"}
+
+    # dst empty
+    d1 = {"data": """{"k1": 100, "k2": ""}"""}
+    assert t(("data", JSON))(d1) == {"data": """{"k1": 100, "k2": ""}""", "k1": "100"}
+
+    d1 = {"data": """{"k1": 100, "k2": ""}"""}
+    assert t(("data", JSON(mode='fill')))(d1) == {"data": """{"k1": 100, "k2": ""}""", "k1": "100", "k2": ""}
+
+
 def test_json_match():
+
+    # default: filter name
+    d1 = {"data": """{"k1": 100, "__123__": 200, "1k": "300"}"""}
+    assert t( ("data", JSON) )(d1) == {"data": """{"k1": 100, "__123__": 200, "1k": "300"}""", "k1": "100"}
+
     # expand - include node, final node
     d2 = {"data": """{"k1": 100, "k2": {"k3": 200, "k4": {"k5": 300} } }"""}
     assert t(("data", JSON(include_node='k5')))(d2) == {'data': '{"k1": 100, "k2": {"k3": 200, "k4": {"k5": 300} } }',
@@ -841,12 +1140,12 @@ def test_json_mixed():
     # jmes - expand
     d1 = {'i': '1', 'data': _get_file_content('json_data/simple_data.json')}
     jmes = 'cve.CVE_data_meta'
-    assert t( ("data", JSON(jmes=jmes, output='data', expand=True)) )(d1) == {'i': '1', 'data': _j('{"ASSIGNER": "cve@mitre.org", "ID": "CVE-2013-0169"}'), 'ASSIGNER': 'cve@mitre.org', 'ID': 'CVE-2013-0169'}
+    assert t( ("data", JSON(jmes=jmes, output='data', expand=True, mode='overwrite')) )(d1) == {'i': '1', 'data': _j('{"ASSIGNER": "cve@mitre.org", "ID": "CVE-2013-0169"}'), 'ASSIGNER': 'cve@mitre.org', 'ID': 'CVE-2013-0169'}
 
     # jmes filter with output - no expand
     d1 = {'data': _get_file_content('json_data/CVE-2013-0169.json')}
     jmes = 'cve.affects.vendor.vendor_data[2].product'
-    assert t( ("data", JSON(jmes=jmes, output='data')) )(d1) == {'data': _j('{"product_data": [{"product_name": "polarssl", "version": {"version_data": [{"version_value": "0.10.0"}, {"version_value": "0.10.1"}, {"version_value": "0.11.0"}]}}]}')}
+    assert t( ("data", JSON(jmes=jmes, output='data', mode='overwrite')) )(d1) == {'data': _j('{"product_data": [{"product_name": "polarssl", "version": {"version_data": [{"version_value": "0.10.0"}, {"version_value": "0.10.1"}, {"version_value": "0.11.0"}]}}]}')}
 
     # jmes filter with expand and options
     d1 = {'data': _get_file_content('json_data/CVE-2013-0169.json')}
@@ -888,6 +1187,8 @@ def test_zip():
 
 
 test_condition()
+test_condition_not()
+test_v()
 test_regex()
 test_csv()
 test_lookup_dict()

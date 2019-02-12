@@ -6,9 +6,16 @@ log service server to put/get data.
 """
 
 try:
-    import logservice_lz4
+    import lz4
+
+    def lz_decompress(raw_size, data):
+        return lz4.loads(struct.pack('<I', raw_size) + data)
+
+    def lz_compresss(data):
+        return lz4.dumps(data)[4:]
+
 except ImportError:
-    pass
+    lz4 = None
 
 import json
 import requests
@@ -48,6 +55,7 @@ from .version import API_VERSION, USER_AGENT
 from .log_logs_raw_pb2 import LogGroupRaw as LogGroup
 from .external_store_config import ExternalStoreConfig
 from .external_store_config_response import *
+import struct
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +177,7 @@ class LogClient(object):
         try:
             locale.setlocale(locale.LC_TIME, "C")
         except Exception as ex:
-            logger.info("failed to set locale time to C. skip it: {0}".format(ex))
+            logger.warning("failed to set locale time to C. skip it: {0}".format(ex))
         return datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
 
     @staticmethod
@@ -305,14 +313,13 @@ class LogClient(object):
         raw_body_size = len(body)
         headers = {'x-log-bodyrawsize': str(raw_body_size), 'Content-Type': 'application/x-protobuf'}
 
-        # if raw_body_size > 5 * 1024 * 1024:  # 10 MB
-        #     raise LogException('InvalidLogSize',
-        #                        "logItems' size exceeds maximum limitation: 5 MB. now: {0} MB.".format(
-        #                            raw_body_size / 1024.0 / 1024))
-
         if compress is None or compress:
-            headers['x-log-compresstype'] = 'deflate'
-            body = zlib.compress(body)
+            if lz4:
+                headers['x-log-compresstype'] = 'lz4'
+                body = lz_compresss(body)
+            else:
+                headers['x-log-compresstype'] = 'deflate'
+                body = zlib.compress(body)
 
         params = {}
         resource = '/logstores/' + logstore + "/shards/lb"
@@ -370,8 +377,12 @@ class LogClient(object):
 
         compress_data = None
         if is_compress:
-            headers['x-log-compresstype'] = 'deflate'
-            compress_data = zlib.compress(body)
+            if lz4:
+                headers['x-log-compresstype'] = 'lz4'
+                compress_data = lz_compresss(body)
+            else:
+                headers['x-log-compresstype'] = 'deflate'
+                compress_data = zlib.compress(body)
 
         params = {}
         logstore = request.get_logstore()
@@ -473,10 +484,10 @@ class LogClient(object):
         :param logstore: logstore name
 
         :type from_time: int/string
-        :param from_time: the begin timestamp or format of time in readable time like "%Y-%m-%d %H:%M:%S CST" e.g. "2018-01-02 12:12:10 CST", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
+        :param from_time: the begin timestamp or format of time in readable time like "%Y-%m-%d %H:%M:%S<time_zone>" e.g. "2018-01-02 12:12:10+8:00", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
 
         :type to_time: int/string
-        :param to_time: the end timestamp or format of time in readable time like "%Y-%m-%d %H:%M:%S CST" e.g. "2018-01-02 12:12:10 CST", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
+        :param to_time: the end timestamp or format of time in readable time like "%Y-%m-%d %H:%M:%S<time_zone>" e.g. "2018-01-02 12:12:10+8:00", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
 
         :type topic: string
         :param topic: topic name of logs, could be None
@@ -568,10 +579,10 @@ class LogClient(object):
         :param logstore: logstore name
 
         :type from_time: int/string
-        :param from_time: the begin timestamp or format of time in readable time like "%Y-%m-%d %H:%M:%S CST" e.g. "2018-01-02 12:12:10 CST", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
+        :param from_time: the begin timestamp or format of time in readable time like "%Y-%m-%d %H:%M:%S<time_zone>" e.g. "2018-01-02 12:12:10+8:00", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
 
         :type to_time: int/string
-        :param to_time: the end timestamp or format of time in readable time like "%Y-%m-%d %H:%M:%S CST" e.g. "2018-01-02 12:12:10 CST", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
+        :param to_time: the end timestamp or format of time in readable time like "%Y-%m-%d %H:%M:%S<time_zone>" e.g. "2018-01-02 12:12:10+8:00", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
 
         :type topic: string
         :param topic: topic name of logs, could be None
@@ -635,7 +646,7 @@ class LogClient(object):
         :param shard_id: the shard id
 
         :type start_time: string/int
-        :param start_time: the start time of cursor, e.g 1441093445 or "begin"/"end", or readable time like "%Y-%m-%d %H:%M:%S CST", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
+        :param start_time: the start time of cursor, e.g 1441093445 or "begin"/"end", or readable time like "%Y-%m-%d %H:%M:%S<time_zone>" e.g. "2018-01-02 12:12:10+8:00", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
 
         :return: GetCursorResponse
         
@@ -769,7 +780,7 @@ class LogClient(object):
         """
         return self.get_cursor(project_name, logstore_name, shard_id, "end")
 
-    def pull_logs(self, project_name, logstore_name, shard_id, cursor, count=1000, end_cursor=None, compress=True):
+    def pull_logs(self, project_name, logstore_name, shard_id, cursor, count=None, end_cursor=None, compress=None):
         """ batch pull log data from log service
         Unsuccessful opertaion will cause an LogException.
 
@@ -792,7 +803,7 @@ class LogClient(object):
         :param end_cursor: the end cursor position to get data
 
         :type compress: boolean
-        :param compress: if use zip compress for transfer data
+        :param compress: if use zip compress for transfer data, default is True
 
         :return: PullLogResponse
         
@@ -800,8 +811,11 @@ class LogClient(object):
         """
 
         headers = {}
-        if compress:
-            headers['Accept-Encoding'] = 'gzip'
+        if compress is None or compress:
+            if lz4:
+                headers['Accept-Encoding'] = 'lz4'
+            else:
+                headers['Accept-Encoding'] = 'gzip'
         else:
             headers['Accept-Encoding'] = ''
 
@@ -811,6 +825,7 @@ class LogClient(object):
         resource = "/logstores/" + logstore_name + "/shards/" + str(shard_id)
         params['type'] = 'log'
         params['cursor'] = cursor
+        count = count or 1000
         params['count'] = str(count)
         if end_cursor:
             params['end_cursor'] = end_cursor
@@ -819,8 +834,11 @@ class LogClient(object):
         compress_type = Util.h_v_td(header, 'x-log-compresstype', '').lower()
         if compress_type == 'lz4':
             raw_size = int(Util.h_v_t(header, 'x-log-bodyrawsize'))
-            raw_data = logservice_lz4.uncompress(raw_size, resp)
-            return PullLogResponse(raw_data, header)
+            if lz4:
+                raw_data = lz_decompress(raw_size, resp)
+                return PullLogResponse(raw_data, header)
+            else:
+                raise LogException("ClientHasNoLz4", "There's no Lz4 lib available to decompress the response", resp_header=header, resp_body=resp)
         elif compress_type in ('gzip', 'deflate'):
             raw_size = int(Util.h_v_t(header, 'x-log-bodyrawsize'))
             raw_data = zlib.decompress(resp)
@@ -828,7 +846,7 @@ class LogClient(object):
         else:
             return PullLogResponse(resp, header)
 
-    def pull_log(self, project_name, logstore_name, shard_id, from_time, to_time, batch_size=1000, compress=True):
+    def pull_log(self, project_name, logstore_name, shard_id, from_time, to_time, batch_size=None, compress=None):
         """ batch pull log data from log service using time-range
         Unsuccessful opertaion will cause an LogException. the time parameter means the time when server receives the logs
 
@@ -842,10 +860,10 @@ class LogClient(object):
         :param shard_id: the shard id
 
         :type from_time: string/int
-        :param from_time: curosr value, could be begin, timestamp or readable time in readable time like "%Y-%m-%d %H:%M:%S CST" e.g. "2018-01-02 12:12:10 CST", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
+        :param from_time: curosr value, could be begin, timestamp or readable time in readable time like "%Y-%m-%d %H:%M:%S<time_zone>" e.g. "2018-01-02 12:12:10+8:00", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
 
         :type to_time: string/int
-        :param to_time: curosr value, could be begin, timestamp or readable time in readable time like "%Y-%m-%d %H:%M:%S CST" e.g. "2018-01-02 12:12:10 CST", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
+        :param to_time: curosr value, could be begin, timestamp or readable time in readable time like "%Y-%m-%d %H:%M:%S<time_zone>" e.g. "2018-01-02 12:12:10+8:00", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
 
         :type batch_size: int
         :param batch_size: batch size to fetch the data in each iteration. by default it's 1000
@@ -870,8 +888,8 @@ class LogClient(object):
 
             begin_cursor = res.get_next_cursor()
 
-    def pull_log_dump(self, project_name, logstore_name, from_time, to_time, file_path, batch_size=500,
-                      compress=True, encodings=None):
+    def pull_log_dump(self, project_name, logstore_name, from_time, to_time, file_path, batch_size=None,
+                      compress=None, encodings=None, shard_list=None, no_escape=None):
         """ dump all logs seperatedly line into file_path, file_path, the time parameters are log received time on server side.
 
         :type project_name: string
@@ -881,10 +899,10 @@ class LogClient(object):
         :param logstore_name: the logstore name
 
         :type from_time: string/int
-        :param from_time: curosr value, could be begin, timestamp or readable time in readable time like "%Y-%m-%d %H:%M:%S CST" e.g. "2018-01-02 12:12:10 CST", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
+        :param from_time: curosr value, could be begin, timestamp or readable time in readable time like "%Y-%m-%d %H:%M:%S<time_zone>" e.g. "2018-01-02 12:12:10+8:00", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
 
         :type to_time: string/int
-        :param to_time: curosr value, could be begin, timestamp or readable time in readable time like "%Y-%m-%d %H:%M:%S CST" e.g. "2018-01-02 12:12:10 CST", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
+        :param to_time: curosr value, could be begin, timestamp or readable time in readable time like "%Y-%m-%d %H:%M:%S<time_zone>" e.g. "2018-01-02 12:12:10+8:00", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
 
         :type file_path: string
         :param file_path: file path with {} for shard id. e.g. "/data/dump_{}.data", {} will be replaced with each partition.
@@ -898,15 +916,23 @@ class LogClient(object):
         :type encodings: string list
         :param encodings: encoding like ["utf8", "latin1"] etc to dumps the logs in json format to file. default is ["utf8",]
 
+        :type shard_list: string
+        :param shard_list: shard number list. could be comma seperated list or range: 1,20,31-40
+
+        :type no_escape: bool
+        :param no_escape: if not_escape the non-ANSI, default is to escape, set it to True if don't want it.
+
         :return: LogResponse {"total_count": 30, "files": {'file_path_1': 10, "file_path_2": 20} })
 
         :raise: LogException
         """
-        if "{}" not in file_path:
-            file_path += "{}"
+        file_path = file_path.replace("{}", "{0}")
+        if "{0}" not in file_path:
+            file_path += "{0}"
 
         return pull_log_dump(self, project_name, logstore_name, from_time, to_time, file_path,
-                             batch_size=batch_size, compress=compress, encodings=encodings)
+                             batch_size=batch_size, compress=compress, encodings=encodings,
+                             shard_list=shard_list, no_escape=no_escape)
 
     def create_logstore(self, project_name, logstore_name,
                         ttl=30,
@@ -2586,7 +2612,7 @@ class LogClient(object):
     def copy_data(self, project, logstore, from_time, to_time=None,
                   to_client=None, to_project=None, to_logstore=None,
                   shard_list=None,
-                  batch_size=500, compress=True, new_topic=None, new_source=None):
+                  batch_size=None, compress=None, new_topic=None, new_source=None):
         """
         copy data from one logstore to another one (could be the same or in different region), the time is log received time on server side.
 
@@ -2597,10 +2623,10 @@ class LogClient(object):
         :param logstore: logstore name
 
         :type from_time: string/int
-        :param from_time: curosr value, could be begin, timestamp or readable time in readable time like "%Y-%m-%d %H:%M:%S CST" e.g. "2018-01-02 12:12:10 CST", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
+        :param from_time: curosr value, could be begin, timestamp or readable time in readable time like "%Y-%m-%d %H:%M:%S<time_zone>" e.g. "2018-01-02 12:12:10+8:00", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
 
         :type to_time: string/int
-        :param to_time: curosr value, default is "end", could be begin, timestamp or readable time in readable time like "%Y-%m-%d %H:%M:%S CST" e.g. "2018-01-02 12:12:10 CST", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
+        :param to_time: curosr value, default is "end", could be begin, timestamp or readable time in readable time like "%Y-%m-%d %H:%M:%S<time_zone>" e.g. "2018-01-02 12:12:10+8:00", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
 
         :type to_client: LogClient
         :param to_client: logclient instance, if empty will use source client
@@ -2637,7 +2663,7 @@ class LogClient(object):
     def transform_data(self, project, logstore, config, from_time, to_time=None,
                        to_client=None, to_project=None, to_logstore=None,
                        shard_list=None,
-                       batch_size=500, compress=True,
+                       batch_size=None, compress=None,
                        cg_name=None, c_name=None,
                        cg_heartbeat_interval=None, cg_data_fetch_interval=None, cg_in_order=None,
                        cg_worker_pool_size=None
@@ -2655,10 +2681,10 @@ class LogClient(object):
         :param config: transform config imported or path of config (in python)
 
         :type from_time: string/int
-        :param from_time: curosr value, could be begin, timestamp or readable time in readable time like "%Y-%m-%d %H:%M:%S CST" e.g. "2018-01-02 12:12:10 CST", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
+        :param from_time: curosr value, could be begin, timestamp or readable time in readable time like "%Y-%m-%d %H:%M:%S<time_zone>" e.g. "2018-01-02 12:12:10+8:00", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
 
         :type to_time: string/int
-        :param to_time: curosr value, leave it as None if consumer group is configured. could be begin, timestamp or readable time in readable time like "%Y-%m-%d %H:%M:%S CST" e.g. "2018-01-02 12:12:10 CST", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
+        :param to_time: curosr value, leave it as None if consumer group is configured. could be begin, timestamp or readable time in readable time like "%Y-%m-%d %H:%M:%S<time_zone>" e.g. "2018-01-02 12:12:10+8:00", also support human readable string, e.g. "1 hour ago", "now", "yesterday 0:0:0", refer to https://aliyun-log-cli.readthedocs.io/en/latest/tutorials/tutorial_human_readable_datetime.html
 
         :type to_client: LogClient
         :param to_client: logclient instance, if empty will use source client

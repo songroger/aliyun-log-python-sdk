@@ -158,11 +158,13 @@ class PullLogResponse(LogResponse):
                         u'__source__': logGroup.Source}
                 item.update(tags)
                 for content in log.Contents:
-                    item[content.Key] = PullLogResponse._b2u(content.Value) if decode_bytes else content.Value
+                    item[PullLogResponse._b2u(content.Key) if decode_bytes else content.Key] = PullLogResponse._b2u(content.Value) if decode_bytes else content.Value
                 flatten_logs_json.append(item)
         return flatten_logs_json
 
     def get_flatten_logs_json(self, time_as_str=None, decode_bytes=None):
+        decode_bytes = decode_bytes or self._is_bytes_type
+
         if self.flatten_logs_json is None:
             self.flatten_logs_json = self.loggroups_to_flattern_list(self.loggroup_list, time_as_str=time_as_str,
                                                                      decode_bytes=decode_bytes)

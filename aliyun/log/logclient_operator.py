@@ -15,8 +15,10 @@ from .logitem import LogItem
 from aliyun.log.pulllog_response import PullLogResponse
 from .consumer import *
 from multiprocessing import RLock
+from .util import base64_encodestring as b64e
 
-MAX_INIT_SHARD_COUNT = 10
+
+MAX_INIT_SHARD_COUNT = 200
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +78,6 @@ def copy_project(from_client, to_client, from_project, to_project, copy_machine_
                                             max_split_shard=ret.max_split_shard,
                                             preserve_storage=ret.preserve_storage
                                             )
-
-            # arrange shard to expected count
-            if expected_rwshard_count > MAX_INIT_SHARD_COUNT:
-                res = arrange_shard(to_client, to_project, logstore_name, expected_rwshard_count)
 
             # copy index
             try:
@@ -198,19 +196,18 @@ def copy_logstore(from_client, from_project, from_logstore, to_logstore, to_proj
             # update logstore's settings
             ret = to_client.update_logstore(to_project, to_logstore,
                                             ttl=ret.get_ttl(),
-                                            shard_count=min(expected_rwshard_count, MAX_INIT_SHARD_COUNT),
                                             enable_tracking=ret.get_enable_tracking(),
                                             append_meta=ret.append_meta,
                                             auto_split=ret.auto_split,
                                             max_split_shard=ret.max_split_shard,
                                             preserve_storage=ret.preserve_storage
                                             )
+
+            # arrange shard to expected count
+            res = arrange_shard(to_client, to_project, to_logstore, min(expected_rwshard_count, MAX_INIT_SHARD_COUNT))
         else:
             raise
 
-    # arrange shard to expected count
-    if expected_rwshard_count > MAX_INIT_SHARD_COUNT:
-        res = arrange_shard(to_client, to_project, to_logstore, expected_rwshard_count)
 
     # copy index
     try:
@@ -332,48 +329,64 @@ def get_encoder_cls(encodings):
 
 def dump_worker(client, project_name, logstore_name, from_time, to_time,
                 shard_id, file_path,
-                batch_size=1000, compress=True, encodings=None):
+                batch_size=None, compress=None, encodings=None, no_escape=None):
     res = client.pull_log(project_name, logstore_name, shard_id, from_time, to_time, batch_size=batch_size,
                           compress=compress)
     encodings = encodings or ('utf8', 'latin1', 'gbk')
+    ensure_ansi = not no_escape
 
     count = 0
-    for data in res:
-        for log in data.get_flatten_logs_json():
-            with open(file_path, "a+") as f:
-                count += 1
-
-                if six.PY2:
-                    last_ex = None
-                    for encoding in encodings:
-                        try:
-                            f.write(json.dumps(log, encoding=encoding))
+    next_cursor = 'as from_time configured'
+    try:
+        for data in res:
+            for log in data.get_flatten_logs_json(decode_bytes=True):
+                with open(file_path, "a+") as f:
+                    count += 1
+                    try:
+                        if six.PY2:
+                            last_ex = None
+                            for encoding in encodings:
+                                try:
+                                    f.write(json.dumps(log, encoding=encoding, ensure_ascii=ensure_ansi))
+                                    f.write("\n")
+                                    break
+                                except UnicodeDecodeError as ex:
+                                    last_ex = ex
+                            else:
+                                raise last_ex
+                        else:
+                            f.write(json.dumps(log, cls=get_encoder_cls(encodings), ensure_ascii=ensure_ansi))
                             f.write("\n")
-                            break
-                        except UnicodeDecodeError as ex:
-                            last_ex = ex
-                    else:
-                        raise last_ex
-                else:
-                    f.write(json.dumps(log, cls=get_encoder_cls(encodings)))
-                    f.write("\n")
+                    except Exception as ex:
+                        logger.error("shard: {0} Fail to dump log: {1}".format(shard_id, b64e(repr(log))), exc_info=True)
+                        raise ex
+            next_cursor = data.next_cursor
+    except Exception as ex:
+        logger.error("dump log failed: task info {0} failed to copy data to target, next cursor: {1} detail: {2}".
+                     format(
+            (project_name, logstore_name, shard_id, from_time, to_time),
+            next_cursor, ex), exc_info=True)
+        raise
 
     return file_path, count
 
 
-def pull_log_dump(client, project_name, logstore_name, from_time, to_time, file_path, batch_size=500, compress=True,
-                  encodings=None):
+def pull_log_dump(client, project_name, logstore_name, from_time, to_time, file_path, batch_size=None, compress=None,
+                  encodings=None, shard_list=None, no_escape=None):
     cpu_count = multiprocessing.cpu_count() * 2
+
     shards = client.list_shards(project_name, logstore_name).get_shards_info()
-    worker_size = min(cpu_count, len(shards))
+    current_shards = [str(shard['shardID']) for shard in shards]
+    target_shards = _parse_shard_list(shard_list, current_shards)
+    worker_size = min(cpu_count, len(target_shards))
 
     result = dict()
     total_count = 0
     with ProcessPoolExecutor(max_workers=worker_size) as pool:
         futures = [pool.submit(dump_worker, client, project_name, logstore_name, from_time, to_time,
-                               shard_id=shard['shardID'], file_path=file_path.format(shard['shardID']),
-                               batch_size=batch_size, compress=compress, encodings=encodings)
-                   for shard in shards]
+                               shard_id=shard, file_path=file_path.format(shard),
+                               batch_size=batch_size, compress=compress, encodings=encodings, no_escape=no_escape)
+                   for shard in target_shards]
 
         for future in as_completed(futures):
             file_path, count = future.result()
@@ -385,8 +398,10 @@ def pull_log_dump(client, project_name, logstore_name, from_time, to_time, file_
 
 
 def copy_worker(from_client, from_project, from_logstore, shard_id, from_time, to_time,
-                to_client, to_project, to_logstore, batch_size=500, compress=True,
+                to_client, to_project, to_logstore, batch_size=None, compress=None,
                 new_topic=None, new_source=None):
+    next_cursor = "As from_time configured"
+
     try:
         iter_data = from_client.pull_log(from_project, from_logstore, shard_id, from_time, to_time, batch_size=batch_size,
                                          compress=compress)
@@ -401,9 +416,11 @@ def copy_worker(from_client, from_project, from_logstore, shard_id, from_time, t
                 rtn = to_client.put_log_raw(to_project, to_logstore, loggroup, compress=compress)
                 count += len(loggroup.Logs)
 
+            next_cursor = res.next_cursor
         return shard_id, count
     except Exception as ex:
-        logger.error(ex)
+        logger.error("copy data failed: task info {0} failed to copy data to target, next cursor: {1} detail: {2}".
+                     format( (from_project, from_logstore, shard_id, from_time, to_time, to_client, to_project, to_logstore), next_cursor, ex), exc_info=True)
         raise
 
 
@@ -442,7 +459,7 @@ def _parse_shard_list(shard_list, current_shard_list):
 def copy_data(from_client, from_project, from_logstore, from_time, to_time=None,
               to_client=None, to_project=None, to_logstore=None,
               shard_list=None,
-              batch_size=500, compress=True, new_topic=None, new_source=None):
+              batch_size=None, compress=None, new_topic=None, new_source=None):
     """
     copy data from one logstore to another one (could be the same or in different region), the time is log received time on server side.
 
@@ -511,7 +528,7 @@ def _split_one_shard_to_multiple(client, project, logstore, shard_info, count, c
 
             current_shard_count += res.count - 1
             increased_shard_count += res.count - 1
-            logger.info("split shard: ", project, logstore, shard_info, count, current_shard_count)
+            logger.info("split shard: project={0}, logstore={1}, shard_info={2}, count={3}, current_shard_count={4}".format(project, logstore, shard_info, count, current_shard_count))
         except Exception as ex:
             print(ex)
             print(x, project, logstore, shard_info, count, current_shard_count)
@@ -695,8 +712,9 @@ def _transform_events_to_logstore(runner, events, to_client, to_project, to_logs
 
 def transform_worker(from_client, from_project, from_logstore, shard_id, from_time, to_time,
                      config,
-                     to_client, to_project, to_logstore, batch_size=500, compress=True,
+                     to_client, to_project, to_logstore, batch_size=None, compress=None,
                      ):
+    next_cursor = "As from_time configured"
     try:
         runner = Runner(config)
         iter_data = from_client.pull_log(from_project, from_logstore, shard_id, from_time, to_time, batch_size=batch_size,
@@ -712,9 +730,13 @@ def transform_worker(from_client, from_project, from_logstore, shard_id, from_ti
             processed += p
             failed += f
 
+            next_cursor = s.next_cursor
         return shard_id, count, removed, processed, failed
     except Exception as ex:
-        logger.error(ex)
+        logger.error("transform data failed: task info {0} failed to copy data to target, next cursor: {1} detail: {2}".
+                     format(
+            (from_project, from_logstore, shard_id, from_time, to_time, to_client, to_project, to_logstore),
+            next_cursor, ex), exc_info=True)
         raise
 
 
@@ -760,7 +782,7 @@ def transform_data(from_client, from_project, from_logstore, from_time,
                    to_client=None, to_project=None, to_logstore=None,
                    shard_list=None,
                    config=None,
-                   batch_size=500, compress=True,
+                   batch_size=None, compress=None,
                    cg_name=None, c_name=None,
                    cg_heartbeat_interval=None, cg_data_fetch_interval=None, cg_in_order=None,
                    cg_worker_pool_size=None
@@ -805,12 +827,15 @@ def transform_data(from_client, from_project, from_logstore, from_time,
                        for shard in target_shards]
 
             for future in as_completed(futures):
-                partition, count, removed, processed, failed = future.result()
-                total_count += count
-                total_removed += removed
-                if count:
-                    result[partition] = {"total_count": count, "transformed":
-                        processed, "removed": removed, "failed": failed}
+                if future.exception():
+                    logger.error("get error when transforming data: {0}".format(future.exception()))
+                else:
+                    partition, count, removed, processed, failed = future.result()
+                    total_count += count
+                    total_removed += removed
+                    if count:
+                        result[partition] = {"total_count": count, "transformed":
+                            processed, "removed": removed, "failed": failed}
 
         return LogResponse({}, {"total_count": total_count, "shards": result})
 
