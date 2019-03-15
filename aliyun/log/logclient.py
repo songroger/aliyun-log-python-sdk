@@ -5,18 +5,6 @@ log service server to put/get data.
 :Author: Aliyun
 """
 
-try:
-    import lz4
-
-    def lz_decompress(raw_size, data):
-        return lz4.loads(struct.pack('<I', raw_size) + data)
-
-    def lz_compresss(data):
-        return lz4.dumps(data)[4:]
-
-except ImportError:
-    lz4 = None
-
 import json
 import requests
 import six
@@ -58,6 +46,22 @@ from .external_store_config_response import *
 import struct
 
 logger = logging.getLogger(__name__)
+
+try:
+    import lz4
+
+    if not hasattr(lz4, 'loads') or not hasattr(lz4, 'dumps'):
+        lz4 = None
+    else:
+        def lz_decompress(raw_size, data):
+            return lz4.loads(struct.pack('<I', raw_size) + data)
+
+        def lz_compresss(data):
+            return lz4.dumps(data)[4:]
+
+except ImportError:
+    lz4 = None
+
 
 CONNECTION_TIME_OUT = 120
 MAX_LIST_PAGING_SIZE = 500
@@ -989,17 +993,25 @@ class LogClient(object):
                 "enable_tracking": enable_tracking,
                 "autoSplit": auto_split,
                 "maxSplitShard": max_split_shard,
-                "appendMeta": append_meta,
-                # "resourceQuota": {
-                #     "strage": {
-                #         "preserved": preserve_storage
-                #     }
-                # }
+                "appendMeta": append_meta
                 }
 
         body_str = six.b(json.dumps(body))
 
-        (resp, header) = self._send("POST", project_name, body_str, resource, params, headers)
+        try:
+            (resp, header) = self._send("POST", project_name, body_str, resource, params, headers)
+        except LogException as ex:
+            if ex.get_error_code() == "LogStoreInfoInvalid" and ex.get_error_message() == "redundant key exist in json":
+                logger.warning("LogStoreInfoInvalid, will retry with basic parameters. detail: {0}".format(ex))
+                body = {"logstoreName": logstore_name, "ttl": int(ttl), "shardCount": int(shard_count),
+                        "enable_tracking": enable_tracking }
+
+                body_str = six.b(json.dumps(body))
+
+                (resp, header) = self._send("POST", project_name, body_str, resource, params, headers)
+            else:
+                raise
+
         return CreateLogStoreResponse(header, resp)
 
     def delete_logstore(self, project_name, logstore_name):
@@ -1114,15 +1126,23 @@ class LogClient(object):
             "shardCount": shard_count,
             "autoSplit": auto_split,
             "maxSplitShard": max_split_shard,
-            "appendMeta": append_meta,
-            # "resourceQuota": {
-            #     "strage": {
-            #         "preserved": preserve_storage
-            #     }
-            # }
+            "appendMeta": append_meta
         }
         body_str = six.b(json.dumps(body))
-        (resp, header) = self._send("PUT", project_name, body_str, resource, params, headers)
+        try:
+            (resp, header) = self._send("PUT", project_name, body_str, resource, params, headers)
+        except LogException as ex:
+            if ex.get_error_code() == "LogStoreInfoInvalid" and ex.get_error_message() == "redundant key exist in json":
+                logger.warning("LogStoreInfoInvalid, will retry with basic parameters. detail: {0}".format(ex))
+                body = { "logstoreName": logstore_name, "ttl": int(ttl), "enable_tracking": enable_tracking,
+                         "shardCount": shard_count }
+
+                body_str = six.b(json.dumps(body))
+
+                (resp, header) = self._send("PUT", project_name, body_str, resource, params, headers)
+            else:
+                raise
+
         return UpdateLogStoreResponse(header, resp)
 
     def list_logstore(self, project_name, logstore_name_pattern=None, offset=0, size=100):
